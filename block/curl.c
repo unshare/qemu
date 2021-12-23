@@ -235,6 +235,13 @@ static size_t curl_header_cb(void *ptr, size_t size, size_t nmemb, void *opaque)
     return realsize;
 }
 
+static int curl_immediate_abort_cb(void *clientp,
+                                   curl_off_t dltotal, curl_off_t dlnow,
+                                   curl_off_t ultotal, curl_off_t ulnow)
+{
+    return dlnow > 0;
+}
+
 /* Called from curl_multi_do_locked, with s->mutex held.  */
 static size_t curl_read_cb(void *ptr, size_t size, size_t nmemb, void *opaque)
 {
@@ -649,6 +656,7 @@ static int curl_open(BlockDriverState *bs, QDict *options, int flags,
     double d;
     const char *secretid;
     const char *protocol_delimiter;
+    long response_code;
     int ret;
 
     ret = bdrv_apply_auto_read_only(bs, "curl driver does not support writes",
@@ -766,8 +774,21 @@ static int curl_open(BlockDriverState *bs, QDict *options, int flags,
     curl_easy_setopt(state->curl, CURLOPT_HEADERFUNCTION,
                      curl_header_cb);
     curl_easy_setopt(state->curl, CURLOPT_HEADERDATA, s);
-    if (curl_easy_perform(state->curl))
-        goto out;
+    if (curl_easy_perform(state->curl)) {
+        curl_easy_getinfo(state->curl, CURLINFO_RESPONSE_CODE, &response_code);
+        switch (response_code) {
+            case 403:
+                curl_easy_setopt(state->curl, CURLOPT_NOBODY, 0);
+                curl_easy_setopt(state->curl, CURLOPT_XFERINFOFUNCTION,
+                                 curl_immediate_abort_cb);
+                curl_easy_setopt(state->curl, CURLOPT_NOPROGRESS, 0);
+                if (curl_easy_perform(state->curl) == CURLE_ABORTED_BY_CALLBACK)
+                    break;
+                goto out;
+            default:
+                goto out;
+        }
+    }
     if (curl_easy_getinfo(state->curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &d)) {
         goto out;
     }
